@@ -76,10 +76,18 @@ function toPlaywrightCookies(cookies) {
   }))
 }
 
+// 브라우저 인스턴스를 프로세스 전체에서 재사용한다. 죽으면(메모리 부족 등) 재시작 없이는
+// 영영 못 쓰는 문제가 있었어서, disconnected 이벤트 감지해서 다음 요청 때 새로 띄우게 함.
 let browserPromise = null
 function getBrowser() {
   if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true })
+    browserPromise = chromium.launch({ headless: true }).then((browser) => {
+      browser.on('disconnected', () => {
+        console.log('[browser] 연결 끊김 — 다음 요청 때 재시작')
+        if (browserPromise) browserPromise = null
+      })
+      return browser
+    })
   }
   return browserPromise
 }
@@ -94,7 +102,8 @@ async function withPage(cookies, fn) {
     const page = await context.newPage()
     return await fn(page)
   } finally {
-    await context.close()
+    // close 자체가 실패해도(브라우저가 이미 죽은 경우) 원래 결과/에러를 덮어쓰지 않게 함
+    await context.close().catch(() => {})
   }
 }
 
