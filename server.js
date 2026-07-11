@@ -257,34 +257,36 @@ app.post('/debug', requireAuth, async (req, res) => {
       await page.waitForTimeout(1500)
       if (isLoginRedirect(page)) return { loginRedirect: true, url: page.url() }
 
-      const candidateSelectors = {
-        directChildHasVisitDate: 'div:has(> :text("방문일"))',
-        descendantHasVisitDate: 'div:has(:text("방문일"))',
-        anyTextVisitDate: 'text=방문일',
-        starRating: 'text=/★\\s*\\d/',
-        editBtn: 'button:has-text("수정")',
-      }
-      const counts = {}
-      for (const [name, sel] of Object.entries(candidateSelectors)) {
-        counts[name] = await page.locator(sel).count().catch((e) => `err:${e.message}`)
+      // 실측으로 확인된 진짜 리뷰 카드 컨테이너
+      const cardSelector = 'li[class*="Review_pui_review"]'
+      const cardCount = await page.locator(cardSelector).count().catch(() => 0)
+
+      // 답글 있는 카드(수정/삭제 버튼)와 답글 없는 카드(등록/닫기 버튼)를 각각 하나씩 찾아서
+      // 카드 전체 HTML을 통째로 뽑는다 — 별점/답글버튼 구조를 한 번에 보기 위함
+      const cards = page.locator(cardSelector)
+      let repliedCardHtml = null
+      let unrepliedCardHtml = null
+      const total = Math.min(cardCount, 10) // 앞쪽 10개만 훑어봄 (전체 43개 다 볼 필요 없음)
+      for (let idx = 0; idx < total; idx++) {
+        const card = cards.nth(idx)
+        const hasEditBtn = (await card.locator('button:has-text("수정")').count()) > 0
+        if (hasEditBtn && !repliedCardHtml) {
+          repliedCardHtml = await card.innerHTML()
+        } else if (!hasEditBtn && !unrepliedCardHtml) {
+          unrepliedCardHtml = await card.innerHTML()
+        }
+        if (repliedCardHtml && unrepliedCardHtml) break
       }
 
       const html = await page.content()
-      const snippets = []
-      const re = /방문일/g
-      let m
-      let i = 0
-      while ((m = re.exec(html)) && i < 3) {
-        snippets.push(html.slice(Math.max(0, m.index - 500), m.index + 200))
-        i++
-      }
 
       return {
         url: page.url(),
         title: await page.title(),
         htmlLength: html.length,
-        counts,
-        snippets,
+        cardCount,
+        repliedCardHtml,
+        unrepliedCardHtml,
       }
     })
 
