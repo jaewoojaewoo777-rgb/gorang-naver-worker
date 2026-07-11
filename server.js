@@ -108,10 +108,13 @@ app.post('/verify', requireAuth, async (req, res) => {
 
   try {
     const result = await withPage(cookies, async (page) => {
+      // React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐 —
+      // domcontentloaded만으론 너무 일찍 캡처돼서 networkidle로 데이터 로딩까지 기다림
       await page.goto(URLS.reviews(placeId, bookingBusinessId), {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
+        waitUntil: 'networkidle',
+        timeout: 30000,
       })
+      await page.waitForTimeout(1500) // networkidle 이후 마지막 렌더링 여유
 
       if (isLoginRedirect(page)) return { valid: false }
 
@@ -134,10 +137,13 @@ app.post('/reviews', requireAuth, async (req, res) => {
 
   try {
     const reviews = await withPage(cookies, async (page) => {
+      // React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐 —
+      // domcontentloaded만으론 너무 일찍 캡처돼서 networkidle로 데이터 로딩까지 기다림
       await page.goto(URLS.reviews(placeId, bookingBusinessId), {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
+        waitUntil: 'networkidle',
+        timeout: 30000,
       })
+      await page.waitForTimeout(1500) // networkidle 이후 마지막 렌더링 여유
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
       // React SPA라 렌더링 시간 필요 — 리뷰 카드 자체 셀렉터 대신 확실한 텍스트가 뜰 때까지 대기
@@ -208,7 +214,8 @@ app.post('/reply', requireAuth, async (req, res) => {
 
   try {
     await withPage(cookies, async (page) => {
-      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'domcontentloaded', timeout: 20000 })
+      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'networkidle', timeout: 30000 })
+      await page.waitForTimeout(1500)
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
       const authorKey = reviewId.split('_')[0]
@@ -246,11 +253,9 @@ app.post('/debug', requireAuth, async (req, res) => {
 
   try {
     const result = await withPage(cookies, async (page) => {
-      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'domcontentloaded', timeout: 20000 })
+      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'networkidle', timeout: 30000 })
+      await page.waitForTimeout(1500)
       if (isLoginRedirect(page)) return { loginRedirect: true, url: page.url() }
-
-      // React SPA라 렌더링 시간 필요 — "방문일" 텍스트가 뜰 때까지 최대 15초 대기
-      await page.waitForSelector('text=방문일', { timeout: 15000 }).catch(() => {})
 
       const candidateSelectors = {
         directChildHasVisitDate: 'div:has(> :text("방문일"))',
