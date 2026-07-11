@@ -30,6 +30,11 @@ const URLS = {
 const REPLY_MIN_LEN = 15
 const REPLY_MAX_LEN = 500
 
+// Playwright innerText()/getAttribute() 등 액션 메서드는 기본 30초까지 요소를 기다린다.
+// 카드마다 없을 수 있는 항목(답글, 결제정보 등)에 이 기본값을 쓰면 카드 하나당 수십 초씩
+// 날아간다(실측: 카드 6개에 120초!). 없으면 바로 포기하도록 전부 짧은 타임아웃을 명시한다.
+const FAST_TIMEOUT = 2000
+
 const SELECTORS = {
   reviewItem: 'li[class*="Review_pui_review"]',
   authorName: 'span[class*="pui__NMi-Dp"]',
@@ -103,14 +108,22 @@ async function gotoReviews(page, placeId, bookingBusinessId) {
 
 // "결제 정보 상세 보기" 링크(/my/review/{id}/paymentinfo)에서 리뷰 고유ID 추출
 async function extractReviewId(card) {
-  const href = await card.locator(SELECTORS.paymentInfoLink).first().getAttribute('href').catch(() => null)
+  const href = await card
+    .locator(SELECTORS.paymentInfoLink)
+    .first()
+    .getAttribute('href', { timeout: FAST_TIMEOUT })
+    .catch(() => null)
   // 실측: 경로가 paymentInfo(대문자 I) — 소문자로 잘못 넣어서 계속 매칭 실패했었음
   const match = href?.match(/\/review\/([a-f0-9]+)\/paymentInfo/i)
   return match ? match[1] : null
 }
 
 async function extractRating(card) {
-  const text = await card.locator(SELECTORS.ratingBox).first().innerText().catch(() => '')
+  const text = await card
+    .locator(SELECTORS.ratingBox)
+    .first()
+    .innerText({ timeout: FAST_TIMEOUT })
+    .catch(() => '')
   // 실측: <svg>...</svg>5<span>점</span> — innerText가 "별점5점" 형태로 나옴
   const match = text.match(/(\d+)\s*점/)
   return match ? parseInt(match[1], 10) : null
@@ -163,17 +176,34 @@ app.post('/reviews', requireAuth, async (req, res) => {
           const id = await extractReviewId(card)
           if (!id) continue // 리뷰 고유ID 못 찾으면 스킵 (데이터 매칭 신뢰 못 함)
 
-          const author = await card.locator(SELECTORS.authorName).first().innerText().catch(() => '익명')
+          const author = await card
+            .locator(SELECTORS.authorName)
+            .first()
+            .innerText({ timeout: FAST_TIMEOUT })
+            .catch(() => '익명')
 
           const dateRows = card.locator(SELECTORS.visitDateRow)
-          const visitDate = await dateRows.nth(0).locator('time').first().innerText().catch(() => '')
+          const visitDate = await dateRows
+            .nth(0)
+            .locator('time')
+            .first()
+            .innerText({ timeout: FAST_TIMEOUT })
+            .catch(() => '')
 
-          const textBlockRaw = await card.locator(SELECTORS.reviewTextBlock).first().innerText().catch(() => '')
+          const textBlockRaw = await card
+            .locator(SELECTORS.reviewTextBlock)
+            .first()
+            .innerText({ timeout: FAST_TIMEOUT })
+            .catch(() => '')
           const text = textBlockRaw.replace(/더보기\s*$/, '').trim().slice(0, 1000)
 
           const hasReply = (await card.locator(SELECTORS.existingReplyEditBtn).count()) > 0
           const existingReply = hasReply
-            ? await card.locator(SELECTORS.existingReplyText).first().innerText().catch(() => null)
+            ? await card
+                .locator(SELECTORS.existingReplyText)
+                .first()
+                .innerText({ timeout: FAST_TIMEOUT })
+                .catch(() => null)
             : null
 
           const rating = await extractRating(card)
@@ -267,7 +297,11 @@ app.post('/debug', requireAuth, async (req, res) => {
         const card = cards.nth(idx)
         const hasEditBtn = (await card.locator(SELECTORS.existingReplyEditBtn).count()) > 0
         const id = await extractReviewId(card)
-        const author = await card.locator(SELECTORS.authorName).first().innerText().catch((e) => `err:${e.message}`)
+        const author = await card
+          .locator(SELECTORS.authorName)
+          .first()
+          .innerText({ timeout: FAST_TIMEOUT })
+          .catch((e) => `err:${e.message}`)
         extractedIds.push({ idx, id, author, hasEditBtn })
         if (hasEditBtn && !repliedCardHtml) repliedCardHtml = await card.innerHTML()
         else if (!hasEditBtn && !unrepliedCardHtml) unrepliedCardHtml = await card.innerHTML()
