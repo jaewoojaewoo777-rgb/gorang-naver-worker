@@ -241,12 +241,15 @@ app.post('/debug', requireAuth, async (req, res) => {
       let repliedCardHtml = null
       let unrepliedCardHtml = null
       const total = Math.min(cardCount, 10)
+      const extractedIds = []
       for (let idx = 0; idx < total; idx++) {
         const card = cards.nth(idx)
         const hasEditBtn = (await card.locator(SELECTORS.existingReplyEditBtn).count()) > 0
+        const id = await extractReviewId(card)
+        const author = await card.locator(SELECTORS.authorName).first().innerText().catch((e) => `err:${e.message}`)
+        extractedIds.push({ idx, id, author, hasEditBtn })
         if (hasEditBtn && !repliedCardHtml) repliedCardHtml = await card.innerHTML()
         else if (!hasEditBtn && !unrepliedCardHtml) unrepliedCardHtml = await card.innerHTML()
-        if (repliedCardHtml && unrepliedCardHtml) break
       }
 
       const html = await page.content()
@@ -255,6 +258,7 @@ app.post('/debug', requireAuth, async (req, res) => {
         title: await page.title(),
         htmlLength: html.length,
         cardCount,
+        extractedIds,
         repliedCardHtml,
         unrepliedCardHtml,
       }
