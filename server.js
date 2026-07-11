@@ -80,7 +80,9 @@ function getBrowser() {
 }
 
 async function withPage(cookies, fn) {
+  const tBrowser = Date.now()
   const browser = await getBrowser()
+  console.log('[withPage] 브라우저 확보', Date.now() - tBrowser, 'ms')
   const context = await browser.newContext({ locale: 'ko-KR' })
   try {
     await context.addCookies(toPlaywrightCookies(cookies))
@@ -142,14 +144,18 @@ app.post('/reviews', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'cookies, placeId, bookingBusinessId 필요' })
   }
 
+  const t0 = Date.now()
   try {
     const reviews = await withPage(cookies, async (page) => {
+      console.log('[reviews] withPage 진입', Date.now() - t0, 'ms')
       await gotoReviews(page, placeId, bookingBusinessId)
+      console.log('[reviews] gotoReviews 완료', Date.now() - t0, 'ms')
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
       // Next.js 쪽에서 어차피 배치(5개)만 처리하므로 여기서도 딱 그만큼만 스크래핑해서 시간을 아낀다
       const allCards = await page.locator(SELECTORS.reviewItem).all()
       const cards = allCards.slice(0, 6)
+      console.log('[reviews] 카드 목록 확보', cards.length, '개,', Date.now() - t0, 'ms')
       const results = []
 
       for (const card of cards) {
@@ -186,12 +192,14 @@ app.post('/reviews', requireAuth, async (req, res) => {
         }
       }
 
+      console.log('[reviews] 카드 파싱 전부 완료', Date.now() - t0, 'ms')
       return results
     })
 
+    console.log('[reviews] 전체 완료', Date.now() - t0, 'ms')
     res.json({ reviews })
   } catch (err) {
-    console.error('[reviews]', err)
+    console.error('[reviews] 실패', Date.now() - t0, 'ms', err)
     res.status(500).json({ error: err.message })
   }
 })
