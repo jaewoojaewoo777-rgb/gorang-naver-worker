@@ -140,7 +140,8 @@ app.post('/reviews', requireAuth, async (req, res) => {
       })
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
-      await page.waitForSelector(SELECTORS.reviewItem, { timeout: 10000 }).catch(() => {})
+      // React SPA라 렌더링 시간 필요 — 리뷰 카드 자체 셀렉터 대신 확실한 텍스트가 뜰 때까지 대기
+      await page.waitForSelector('text=방문일', { timeout: 15000 }).catch(() => {})
 
       const items = await page.locator(SELECTORS.reviewItem).all()
       const results = []
@@ -231,6 +232,60 @@ app.post('/reply', requireAuth, async (req, res) => {
     res.json({ ok: true })
   } catch (err) {
     console.error('[reply]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 임시 진단용 엔드포인트 — 리뷰 카드 셀렉터가 안 맞을 때 실제 HTML 구조를 확인하기 위함.
+// 셀렉터 확정되면 지워도 됨.
+app.post('/debug', requireAuth, async (req, res) => {
+  const { cookies, placeId, bookingBusinessId } = req.body
+  if (!Array.isArray(cookies) || !placeId || !bookingBusinessId) {
+    return res.status(400).json({ error: 'cookies, placeId, bookingBusinessId 필요' })
+  }
+
+  try {
+    const result = await withPage(cookies, async (page) => {
+      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'domcontentloaded', timeout: 20000 })
+      if (isLoginRedirect(page)) return { loginRedirect: true, url: page.url() }
+
+      // React SPA라 렌더링 시간 필요 — "방문일" 텍스트가 뜰 때까지 최대 15초 대기
+      await page.waitForSelector('text=방문일', { timeout: 15000 }).catch(() => {})
+
+      const candidateSelectors = {
+        directChildHasVisitDate: 'div:has(> :text("방문일"))',
+        descendantHasVisitDate: 'div:has(:text("방문일"))',
+        anyTextVisitDate: 'text=방문일',
+        starRating: 'text=/★\\s*\\d/',
+        editBtn: 'button:has-text("수정")',
+      }
+      const counts = {}
+      for (const [name, sel] of Object.entries(candidateSelectors)) {
+        counts[name] = await page.locator(sel).count().catch((e) => `err:${e.message}`)
+      }
+
+      const html = await page.content()
+      const snippets = []
+      const re = /방문일/g
+      let m
+      let i = 0
+      while ((m = re.exec(html)) && i < 3) {
+        snippets.push(html.slice(Math.max(0, m.index - 500), m.index + 200))
+        i++
+      }
+
+      return {
+        url: page.url(),
+        title: await page.title(),
+        htmlLength: html.length,
+        counts,
+        snippets,
+      }
+    })
+
+    res.json(result)
+  } catch (err) {
+    console.error('[debug]', err)
     res.status(500).json({ error: err.message })
   }
 })
