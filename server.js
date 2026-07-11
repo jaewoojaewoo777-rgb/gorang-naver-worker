@@ -4,9 +4,11 @@
 // 캡처해준 세션쿠키를 여기서 Playwright에 주입해, 네이버 스마트플레이스 사업자센터를
 // 사람이 쓰듯 브라우저로 조작해서 리뷰를 긁어오고 답변을 게시한다.
 //
-// ⚠️ 2026-07-11 실제 화면 캡처(마음스튜디오 계정)로 URL 구조/버튼 문구는 확인됨.
-// 다만 리뷰 카드 컨테이너의 실제 class/속성은 DevTools 없이는 못 봐서 텍스트 기반 셀렉터로
-// 추정 구현했다. 실제 쿠키로 /reviews 한 번 돌려보고 결과가 비거나 이상하면 이 부분부터 의심할 것.
+// ⚠️ 2026-07-12 실제 화면 + HTML 덤프(마음스튜디오 계정)로 셀렉터 확정.
+// 핵심 발견: 수정/삭제/등록 버튼은 <button>이 아니라 <a role="button">이고,
+// data-pui-click-code 속성(rv.replyedit/rv.replydelete/rv.replyfold 등)이 class 해시보다
+// 훨씬 안정적인 식별자. 리뷰 고유ID는 "결제 정보 상세 보기" 링크 안에 들어있음
+// (/my/review/{id}/paymentinfo). 별점은 SVG로 렌더링돼서 텍스트로 못 뽑음(별도 처리 필요, 현재 null).
 
 const express = require('express')
 const { chromium } = require('playwright')
@@ -17,9 +19,7 @@ app.use(express.json({ limit: '5mb' }))
 const PORT = process.env.PORT || 3000
 const WORKER_SECRET = process.env.NAVER_WORKER_SECRET
 
-// 실측 확인됨 (2026-07-11, 마음스튜디오 예시):
-// https://new.smartplace.naver.com/bizes/place/5176498/reviews?bookingBusinessId=1663323&menu=visitor
-// placeId(URL 경로)와 bookingBusinessId(쿼리)는 서로 다른 값이라 둘 다 필요하다.
+// 실측 확인됨: https://new.smartplace.naver.com/bizes/place/{placeId}/reviews?bookingBusinessId={id}&menu=visitor
 const URLS = {
   reviews: (placeId, bookingBusinessId) =>
     `https://new.smartplace.naver.com/bizes/place/${placeId}/reviews?bookingBusinessId=${bookingBusinessId}&menu=visitor`,
@@ -30,27 +30,18 @@ const REPLY_MIN_LEN = 15
 const REPLY_MAX_LEN = 500
 
 const SELECTORS = {
-  // 로그인 세션 만료 시 nid.naver.com으로 리다이렉트됨 (page.url()로 판별, 아래 isLoginRedirect 참고)
-
-  // 리뷰 카드 컨테이너: 실제 class명 미확인. "방문일"이 모든 리뷰 카드에 공통으로 찍혀있는 걸
-  // 이용해 그 텍스트를 포함하는 블록을 카드 단위로 취급하는 임시 방편.
-  // TODO(검증필요): DevTools로 실제 리뷰 카드 class/data-* 확인 후 안정적인 셀렉터로 교체.
-  reviewItem: 'div:has(> :text("방문일"))',
-
-  // 별점: "★5" 형태로 붉은 별 아이콘 옆에 숫자가 붙어서 렌더링됨 (실측 확인)
-  reviewRatingText: 'text=/★\\s*\\d/',
-
-  // 기존 답글 있는 카드: 사업장 이름(마음스튜디오 등) + "수정"/"삭제" 버튼 쌍으로 식별 (실측 확인)
-  existingReplyEditBtn: 'button:has-text("수정")',
-  existingReplyDeleteBtn: 'button:has-text("삭제")',
-
-  // 답글 수정 시 나오는 텍스트영역 + 저장/취소 버튼 (실측 확인: "수정"=저장, "닫기"=취소)
+  reviewItem: 'li[class*="Review_pui_review"]',
+  authorName: 'span[class*="pui__NMi-Dp"]',
+  visitDateRow: 'div[class*="pui__4rEbt5"]', // 카드 내 1번째=방문일, 2번째=작성일
+  reviewTextBlock: 'div[class*="pui__vn15t2"]',
+  paymentInfoLink: '[data-pui-click-code="rv.paymentinfo"]', // href에 리뷰 고유ID 포함
+  existingReplyText: '[data-pui-click-code="rv.replyfold"]',
+  existingReplyEditBtn: '[data-pui-click-code="rv.replyedit"]',
+  existingReplyDeleteBtn: '[data-pui-click-code="rv.replydelete"]',
   replyTextarea: 'textarea',
-  replySaveBtn: 'button:has-text("수정")',
-  replyCancelBtn: 'button:has-text("닫기")',
-
-  // 미답글 리뷰는 별도 트리거 클릭 없이 빈 textarea + "등록"/"닫기" 버튼이 바로 노출됨 (실측 확인, 2026-07-11)
-  newReplySubmitBtn: 'button:has-text("등록")',
+  replySaveBtn: '[role="button"]:has-text("수정")', // 수정모드에서 저장 버튼
+  // TODO(검증필요): 미답글 리뷰의 등록 버튼도 data-pui-click-code가 있을 가능성 높음 — 아직 실측 못함
+  newReplySubmitBtn: '[role="button"]:has-text("등록")',
 }
 
 function requireAuth(req, res, next) {
@@ -98,8 +89,20 @@ async function withPage(cookies, fn) {
   }
 }
 
-// placeId/bookingBusinessId는 확장에서 사장님이 리뷰 페이지를 열어둔 상태의 탭 URL에서 직접
-// 파싱해오므로(연동 시점에 결정), 여기서는 그 값이 실제로 유효한 세션인지만 확인한다.
+// React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐 —
+// domcontentloaded만으론 너무 일찍 캡처돼서 networkidle로 데이터 로딩까지 기다림
+async function gotoReviews(page, placeId, bookingBusinessId) {
+  await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'networkidle', timeout: 30000 })
+  await page.waitForTimeout(1500)
+}
+
+// "결제 정보 상세 보기" 링크(/my/review/{id}/paymentinfo)에서 리뷰 고유ID 추출
+async function extractReviewId(card) {
+  const href = await card.locator(SELECTORS.paymentInfoLink).first().getAttribute('href').catch(() => null)
+  const match = href?.match(/\/review\/([a-f0-9]+)\/paymentinfo/)
+  return match ? match[1] : null
+}
+
 app.post('/verify', requireAuth, async (req, res) => {
   const { cookies, placeId, bookingBusinessId } = req.body
   if (!Array.isArray(cookies) || !placeId || !bookingBusinessId) {
@@ -108,14 +111,7 @@ app.post('/verify', requireAuth, async (req, res) => {
 
   try {
     const result = await withPage(cookies, async (page) => {
-      // React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐 —
-      // domcontentloaded만으론 너무 일찍 캡처돼서 networkidle로 데이터 로딩까지 기다림
-      await page.goto(URLS.reviews(placeId, bookingBusinessId), {
-        waitUntil: 'networkidle',
-        timeout: 30000,
-      })
-      await page.waitForTimeout(1500) // networkidle 이후 마지막 렌더링 여유
-
+      await gotoReviews(page, placeId, bookingBusinessId)
       if (isLoginRedirect(page)) return { valid: false }
 
       const reviewCount = await page.locator(SELECTORS.reviewItem).count().catch(() => 0)
@@ -137,56 +133,40 @@ app.post('/reviews', requireAuth, async (req, res) => {
 
   try {
     const reviews = await withPage(cookies, async (page) => {
-      // React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐 —
-      // domcontentloaded만으론 너무 일찍 캡처돼서 networkidle로 데이터 로딩까지 기다림
-      await page.goto(URLS.reviews(placeId, bookingBusinessId), {
-        waitUntil: 'networkidle',
-        timeout: 30000,
-      })
-      await page.waitForTimeout(1500) // networkidle 이후 마지막 렌더링 여유
+      await gotoReviews(page, placeId, bookingBusinessId)
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
-      // React SPA라 렌더링 시간 필요 — 리뷰 카드 자체 셀렉터 대신 확실한 텍스트가 뜰 때까지 대기
-      await page.waitForSelector('text=방문일', { timeout: 15000 }).catch(() => {})
-
-      const items = await page.locator(SELECTORS.reviewItem).all()
+      const cards = await page.locator(SELECTORS.reviewItem).all()
       const results = []
 
-      for (const item of items) {
+      for (const card of cards) {
         try {
-          const fullText = await item.innerText().catch(() => '')
-          if (!fullText.includes('방문일')) continue // 리뷰 카드가 아닌 중첩 div 제외
+          const id = await extractReviewId(card)
+          if (!id) continue // 리뷰 고유ID 못 찾으면 스킵 (데이터 매칭 신뢰 못 함)
 
-          // 작성자: "방문일" 줄 이전의 첫 줄을 이름으로 취급 (실측: 이름 다음 줄이 "리뷰 N·사진 M·K번째 방문")
-          const lines = fullText.split('\n').map((l) => l.trim()).filter(Boolean)
-          const visitLineIdx = lines.findIndex((l) => l.startsWith('방문일'))
-          const author = visitLineIdx > 0 ? lines[0] : '익명'
-          const visitLine = visitLineIdx >= 0 ? lines[visitLineIdx] : ''
+          const author = await card.locator(SELECTORS.authorName).first().innerText().catch(() => '익명')
 
-          const ratingMatch = fullText.match(/★\s*(\d)/)
-          const rating = ratingMatch ? parseInt(ratingMatch[1], 10) : null
+          const dateRows = card.locator(SELECTORS.visitDateRow)
+          const visitDate = await dateRows.nth(0).locator('time').first().innerText().catch(() => '')
 
-          const hasReply =
-            (await item.locator(SELECTORS.existingReplyEditBtn).count()) > 0 &&
-            (await item.locator(SELECTORS.existingReplyDeleteBtn).count()) > 0
+          const textBlockRaw = await card.locator(SELECTORS.reviewTextBlock).first().innerText().catch(() => '')
+          const text = textBlockRaw.replace(/더보기\s*$/, '').trim().slice(0, 1000)
 
-          // 리뷰 본문: "더보기" 등 UI 문구를 제외한 나머지 텍스트 (부정확할 수 있음 — TODO 검증)
-          const text = lines
-            .filter((l) => !['더보기', '수정', '삭제', '닫기'].includes(l))
-            .join(' ')
-            .slice(0, 1000)
+          const hasReply = (await card.locator(SELECTORS.existingReplyEditBtn).count()) > 0
+          const existingReply = hasReply
+            ? await card.locator(SELECTORS.existingReplyText).first().innerText().catch(() => null)
+            : null
 
-          // 리뷰 고유 ID: data-id 등을 못 찾아서 작성자+방문일 조합으로 대체 (실측 후 개선 필요)
-          const id = `${author}_${visitLine}`.replace(/\s+/g, '').slice(0, 200)
-
+          // TODO(검증필요): 별점이 SVG로 렌더링돼서 텍스트로 못 뽑음. AI 분류에 별점이 필수는
+          // 아니라 일단 null로 두고, 리뷰 본문 내용으로 감성 분류하도록 함.
           results.push({
             id,
             author,
-            rating,
+            rating: null,
             text,
-            date: visitLine,
+            date: visitDate,
             hasReply,
-            existingReply: null, // TODO(검증필요): 기존 답글 텍스트만 정확히 뽑는 셀렉터 필요
+            existingReply,
           })
         } catch (e) {
           console.error('[reviews] 항목 파싱 실패:', e.message)
@@ -214,22 +194,23 @@ app.post('/reply', requireAuth, async (req, res) => {
 
   try {
     await withPage(cookies, async (page) => {
-      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'networkidle', timeout: 30000 })
-      await page.waitForTimeout(1500)
+      await gotoReviews(page, placeId, bookingBusinessId)
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
-      const authorKey = reviewId.split('_')[0]
-      const target = page.locator(SELECTORS.reviewItem).filter({ hasText: authorKey }).first()
+      const target = page
+        .locator(SELECTORS.reviewItem)
+        .filter({ has: page.locator(`a[href*="${reviewId}"]`) })
+        .first()
 
       const hasExisting = (await target.locator(SELECTORS.existingReplyEditBtn).count()) > 0
       if (hasExisting) {
-        // 기존 답글 수정 플로우 (실측 확인됨)
+        // 기존 답글 수정 플로우
         await target.locator(SELECTORS.existingReplyEditBtn).first().click({ timeout: 10000 })
         const textarea = target.locator(SELECTORS.replyTextarea).first()
         await textarea.fill(replyText, { timeout: 10000 })
         await target.locator(SELECTORS.replySaveBtn).first().click({ timeout: 10000 })
       } else {
-        // 미답글 리뷰는 트리거 클릭 없이 입력창이 이미 노출돼 있음 (실측 확인, 2026-07-11)
+        // 미답글 리뷰는 트리거 클릭 없이 입력창이 이미 노출돼 있음
         const textarea = target.locator(SELECTORS.replyTextarea).first()
         await textarea.fill(replyText, { timeout: 10000 })
         await target.locator(SELECTORS.newReplySubmitBtn).first().click({ timeout: 10000 })
@@ -243,8 +224,7 @@ app.post('/reply', requireAuth, async (req, res) => {
   }
 })
 
-// 임시 진단용 엔드포인트 — 리뷰 카드 셀렉터가 안 맞을 때 실제 HTML 구조를 확인하기 위함.
-// 셀렉터 확정되면 지워도 됨.
+// 임시 진단용 엔드포인트 — 셀렉터 확정되면 지워도 됨.
 app.post('/debug', requireAuth, async (req, res) => {
   const { cookies, placeId, bookingBusinessId } = req.body
   if (!Array.isArray(cookies) || !placeId || !bookingBusinessId) {
@@ -253,33 +233,23 @@ app.post('/debug', requireAuth, async (req, res) => {
 
   try {
     const result = await withPage(cookies, async (page) => {
-      await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'networkidle', timeout: 30000 })
-      await page.waitForTimeout(1500)
+      await gotoReviews(page, placeId, bookingBusinessId)
       if (isLoginRedirect(page)) return { loginRedirect: true, url: page.url() }
 
-      // 실측으로 확인된 진짜 리뷰 카드 컨테이너
-      const cardSelector = 'li[class*="Review_pui_review"]'
-      const cardCount = await page.locator(cardSelector).count().catch(() => 0)
-
-      // 답글 있는 카드(수정/삭제 버튼)와 답글 없는 카드(등록/닫기 버튼)를 각각 하나씩 찾아서
-      // 카드 전체 HTML을 통째로 뽑는다 — 별점/답글버튼 구조를 한 번에 보기 위함
-      const cards = page.locator(cardSelector)
+      const cardCount = await page.locator(SELECTORS.reviewItem).count().catch(() => 0)
+      const cards = page.locator(SELECTORS.reviewItem)
       let repliedCardHtml = null
       let unrepliedCardHtml = null
-      const total = Math.min(cardCount, 10) // 앞쪽 10개만 훑어봄 (전체 43개 다 볼 필요 없음)
+      const total = Math.min(cardCount, 10)
       for (let idx = 0; idx < total; idx++) {
         const card = cards.nth(idx)
-        const hasEditBtn = (await card.locator('button:has-text("수정")').count()) > 0
-        if (hasEditBtn && !repliedCardHtml) {
-          repliedCardHtml = await card.innerHTML()
-        } else if (!hasEditBtn && !unrepliedCardHtml) {
-          unrepliedCardHtml = await card.innerHTML()
-        }
+        const hasEditBtn = (await card.locator(SELECTORS.existingReplyEditBtn).count()) > 0
+        if (hasEditBtn && !repliedCardHtml) repliedCardHtml = await card.innerHTML()
+        else if (!hasEditBtn && !unrepliedCardHtml) unrepliedCardHtml = await card.innerHTML()
         if (repliedCardHtml && unrepliedCardHtml) break
       }
 
       const html = await page.content()
-
       return {
         url: page.url(),
         title: await page.title(),
