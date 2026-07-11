@@ -8,7 +8,8 @@
 // 핵심 발견: 수정/삭제/등록 버튼은 <button>이 아니라 <a role="button">이고,
 // data-pui-click-code 속성(rv.replyedit/rv.replydelete/rv.replyfold 등)이 class 해시보다
 // 훨씬 안정적인 식별자. 리뷰 고유ID는 "결제 정보 상세 보기" 링크 안에 들어있음
-// (/my/review/{id}/paymentinfo). 별점은 SVG로 렌더링돼서 텍스트로 못 뽑음(별도 처리 필요, 현재 null).
+// (/my/review/{id}/paymentInfo — 대문자 I 주의). 별점은 SVG 아이콘 뒤에 숫자가 텍스트로
+// 붙어있어서(예: "별점5점") 정규식으로 추출 가능.
 
 const express = require('express')
 const { chromium } = require('playwright')
@@ -34,6 +35,7 @@ const SELECTORS = {
   authorName: 'span[class*="pui__NMi-Dp"]',
   visitDateRow: 'div[class*="pui__4rEbt5"]', // 카드 내 1번째=방문일, 2번째=작성일
   reviewTextBlock: 'div[class*="pui__vn15t2"]',
+  ratingBox: 'div[class*="pui__6abRMf"]', // innerText가 "별점N점" 형태 (숫자는 svg 뒤 텍스트노드)
   paymentInfoLink: '[data-pui-click-code="rv.paymentinfo"]', // href에 리뷰 고유ID 포함
   existingReplyText: '[data-pui-click-code="rv.replyfold"]',
   existingReplyEditBtn: '[data-pui-click-code="rv.replyedit"]',
@@ -99,8 +101,16 @@ async function gotoReviews(page, placeId, bookingBusinessId) {
 // "결제 정보 상세 보기" 링크(/my/review/{id}/paymentinfo)에서 리뷰 고유ID 추출
 async function extractReviewId(card) {
   const href = await card.locator(SELECTORS.paymentInfoLink).first().getAttribute('href').catch(() => null)
-  const match = href?.match(/\/review\/([a-f0-9]+)\/paymentinfo/)
+  // 실측: 경로가 paymentInfo(대문자 I) — 소문자로 잘못 넣어서 계속 매칭 실패했었음
+  const match = href?.match(/\/review\/([a-f0-9]+)\/paymentInfo/i)
   return match ? match[1] : null
+}
+
+async function extractRating(card) {
+  const text = await card.locator(SELECTORS.ratingBox).first().innerText().catch(() => '')
+  // 실측: <svg>...</svg>5<span>점</span> — innerText가 "별점5점" 형태로 나옴
+  const match = text.match(/(\d+)\s*점/)
+  return match ? parseInt(match[1], 10) : null
 }
 
 app.post('/verify', requireAuth, async (req, res) => {
@@ -157,12 +167,12 @@ app.post('/reviews', requireAuth, async (req, res) => {
             ? await card.locator(SELECTORS.existingReplyText).first().innerText().catch(() => null)
             : null
 
-          // TODO(검증필요): 별점이 SVG로 렌더링돼서 텍스트로 못 뽑음. AI 분류에 별점이 필수는
-          // 아니라 일단 null로 두고, 리뷰 본문 내용으로 감성 분류하도록 함.
+          const rating = await extractRating(card)
+
           results.push({
             id,
             author,
-            rating: null,
+            rating,
             text,
             date: visitDate,
             hasReply,
