@@ -91,11 +91,12 @@ async function withPage(cookies, fn) {
   }
 }
 
-// React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐 —
-// domcontentloaded만으론 너무 일찍 캡처돼서 networkidle로 데이터 로딩까지 기다림
+// React SPA라 초기 HTML엔 리뷰 목록이 없고 이후 별도 API 호출로 채워짐.
+// networkidle은 네이버 쪽 백그라운드 통신이 안 끊겨서 거의 항상 타임아웃까지 다 기다리는
+// 문제가 있었음(Vercel 함수 504의 주요 원인) → 리뷰 카드 셀렉터가 뜨는지 직접 기다리는 걸로 변경.
 async function gotoReviews(page, placeId, bookingBusinessId) {
-  await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'networkidle', timeout: 30000 })
-  await page.waitForTimeout(1500)
+  await page.goto(URLS.reviews(placeId, bookingBusinessId), { waitUntil: 'domcontentloaded', timeout: 15000 })
+  await page.waitForSelector(SELECTORS.reviewItem, { timeout: 15000 }).catch(() => {})
 }
 
 // "결제 정보 상세 보기" 링크(/my/review/{id}/paymentinfo)에서 리뷰 고유ID 추출
@@ -146,7 +147,9 @@ app.post('/reviews', requireAuth, async (req, res) => {
       await gotoReviews(page, placeId, bookingBusinessId)
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
-      const cards = await page.locator(SELECTORS.reviewItem).all()
+      // Next.js 쪽에서 어차피 배치(5개)만 처리하므로 여기서도 딱 그만큼만 스크래핑해서 시간을 아낀다
+      const allCards = await page.locator(SELECTORS.reviewItem).all()
+      const cards = allCards.slice(0, 6)
       const results = []
 
       for (const card of cards) {
