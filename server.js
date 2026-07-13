@@ -317,6 +317,10 @@ app.post('/debug', requireAuth, async (req, res) => {
       }
 
       const html = await page.content()
+      // 카드가 0개일 때 화면에 실제로 뭐가 떠 있는지(에러 메시지/권한없음/빈 상태 등) 확인용
+      const bodyText = await page
+        .evaluate(() => document.body.innerText)
+        .catch((e) => `err:${e.message}`)
       return {
         url: page.url(),
         title: await page.title(),
@@ -325,6 +329,7 @@ app.post('/debug', requireAuth, async (req, res) => {
         extractedIds,
         repliedCardHtml,
         unrepliedCardHtml,
+        bodyText: (bodyText || '').slice(0, 2000),
       }
     })
 
