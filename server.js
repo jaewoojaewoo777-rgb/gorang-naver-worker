@@ -115,6 +115,20 @@ async function gotoReviews(page, placeId, bookingBusinessId) {
   await page.waitForSelector(SELECTORS.reviewItem, { timeout: 15000 }).catch(() => {})
 }
 
+// 네이버 리뷰 목록은 무한스크롤이라 처음엔 카드 10개 정도만 그려짐. "네이버 새 리뷰 확인"을
+// 반복 눌러도 매번 똑같은 최신 10개만 보여서 두 번째 클릭부터 전부 "이미 있음"으로 걸러지던
+// 문제 발견(2026-07-13) → 목표 개수에 도달하거나 더 안 늘어날 때까지 스크롤해서 로드.
+async function loadMoreCards(page, targetCount = 30, maxScrolls = 8) {
+  let lastCount = 0
+  for (let i = 0; i < maxScrolls; i++) {
+    const count = await page.locator(SELECTORS.reviewItem).count().catch(() => 0)
+    if (count >= targetCount || (i > 0 && count === lastCount)) break
+    lastCount = count
+    await page.locator(SELECTORS.reviewItem).last().scrollIntoViewIfNeeded({ timeout: FAST_TIMEOUT }).catch(() => {})
+    await page.waitForTimeout(800)
+  }
+}
+
 // "결제 정보 상세 보기" 링크(/my/review/{id}/paymentinfo)에서 리뷰 고유ID 추출
 async function extractReviewId(card) {
   const href = await card
@@ -174,9 +188,14 @@ app.post('/reviews', requireAuth, async (req, res) => {
       console.log('[reviews] gotoReviews 완료', Date.now() - t0, 'ms')
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
-      // Next.js 쪽에서 어차피 배치(5개)만 처리하므로 여기서도 딱 그만큼만 스크래핑해서 시간을 아낀다
+      // 무한스크롤이라 처음엔 카드 10개 정도만 로드돼있음 — 스크롤해서 더 끌어올림.
+      // Next.js 쪽은 배치(5개)씩만 처리하지만, 여기서 풀을 15개까지 확보해둬야
+      // "네이버 새 리뷰 확인"을 반복 눌렀을 때 매번 같은 카드만 걸리지 않고 새 리뷰로 넘어감.
+      // 카드 하나 파싱에 ~1.3초라 너무 많이 잡으면 Vercel 55초 제한(AI분석까지 포함)에 걸림 — 15개로 제한.
+      await loadMoreCards(page, 15, 5)
+      console.log('[reviews] 스크롤 후 카드 개수', await page.locator(SELECTORS.reviewItem).count().catch(() => 0), Date.now() - t0, 'ms')
       const allCards = await page.locator(SELECTORS.reviewItem).all()
-      const cards = allCards.slice(0, 6)
+      const cards = allCards.slice(0, 15)
       console.log('[reviews] 카드 목록 확보', cards.length, '개,', Date.now() - t0, 'ms')
       const results = []
 
