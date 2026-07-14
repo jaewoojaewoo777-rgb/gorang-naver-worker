@@ -17,6 +17,14 @@ const { chromium } = require('playwright')
 const app = express()
 app.use(express.json({ limit: '5mb' }))
 
+// 배포 직후 요청이 컨테이너까지 아예 안 들어오는 건지(프록시/스왑 문제) vs 인증에서
+// 막히는 건지 vs 브라우저 실행에서 멈추는 건지 구분하기 위한 최소 진입 로그.
+// (2026-07-13: loadMoreCards 배포 직후 [reviews] 로그가 전혀 안 찍히는 현상 발견, 원인 미확인)
+app.use((req, res, next) => {
+  console.log(`[request] ${req.method} ${req.path}`)
+  next()
+})
+
 const PORT = process.env.PORT || 3000
 const WORKER_SECRET = process.env.NAVER_WORKER_SECRET
 
@@ -54,6 +62,7 @@ const SELECTORS = {
 function requireAuth(req, res, next) {
   const auth = req.headers.authorization || ''
   if (!WORKER_SECRET || auth !== `Bearer ${WORKER_SECRET}`) {
+    console.warn(`[auth] 거부 — secret설정됨:${!!WORKER_SECRET}, 헤더존재:${!!req.headers.authorization}`)
     return res.status(401).json({ error: '인증 실패' })
   }
   next()
@@ -81,7 +90,9 @@ function toPlaywrightCookies(cookies) {
 let browserPromise = null
 function getBrowser() {
   if (!browserPromise) {
+    console.log('[browser] 신규 launch 시작')
     browserPromise = chromium.launch({ headless: true }).then((browser) => {
+      console.log('[browser] launch 완료')
       browser.on('disconnected', () => {
         console.log('[browser] 연결 끊김 — 다음 요청 때 재시작')
         if (browserPromise) browserPromise = null
