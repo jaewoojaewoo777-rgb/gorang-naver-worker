@@ -186,7 +186,7 @@ app.post('/verify', requireAuth, async (req, res) => {
 })
 
 app.post('/reviews', requireAuth, async (req, res) => {
-  const { cookies, placeId, bookingBusinessId } = req.body
+  const { cookies, placeId, bookingBusinessId, knownCount } = req.body
   if (!Array.isArray(cookies) || !placeId || !bookingBusinessId) {
     return res.status(400).json({ error: 'cookies, placeId, bookingBusinessId 필요' })
   }
@@ -199,15 +199,20 @@ app.post('/reviews', requireAuth, async (req, res) => {
       console.log('[reviews] gotoReviews 완료', Date.now() - t0, 'ms')
       if (isLoginRedirect(page)) throw new Error('세션 만료 — 확장에서 다시 연결 필요')
 
-      // 무한스크롤이라 처음엔 카드 10개 정도만 로드돼있음 — 스크롤해서 더 끌어올림.
-      // Next.js 쪽은 배치(5개)씩만 처리하지만, 여기서 풀을 15개까지 확보해둬야
-      // "네이버 새 리뷰 확인"을 반복 눌렀을 때 매번 같은 카드만 걸리지 않고 새 리뷰로 넘어감.
-      // 카드 하나 파싱에 ~1.3초라 너무 많이 잡으면 Vercel 55초 제한(AI분석까지 포함)에 걸림 — 15개로 제한.
-      await loadMoreCards(page, 15, 5)
+      // (2026-07-15 버그 수정) 예전엔 항상 allCards.slice(0, 15)로 "최신 15개"만 고정으로
+      // 가져가서, 그 15개가 DB에 다 쌓이고 나면 스크롤을 해도 영원히 같은 15개만 다시 보고
+      // "새 리뷰 없음"만 뜨는 문제가 있었음(43개 중 15개 이후로는 절대 못 감).
+      // 이제 Next.js가 이미 DB에 몇 개 있는지(knownCount) 같이 보내주면, 그 뒤 15개
+      // 구간(윈도우)을 긁어와서 폴링할 때마다 점점 더 오래된 리뷰로 넘어가게 함.
+      // 카드 하나 파싱에 ~1.3초라 한 번에 15개 넘게 추출하면 Vercel 55초 제한에 걸림 —
+      // 추출량 자체는 15개로 유지하고, "어디서부터" 15개를 뽑을지만 옮겨감.
+      const start = Math.max(0, knownCount || 0)
+      const target = Math.min(start + 15, 60) // 무한 스크롤 폭주 방지용 상한
+      await loadMoreCards(page, target, 10)
       console.log('[reviews] 스크롤 후 카드 개수', await page.locator(SELECTORS.reviewItem).count().catch(() => 0), Date.now() - t0, 'ms')
       const allCards = await page.locator(SELECTORS.reviewItem).all()
-      const cards = allCards.slice(0, 15)
-      console.log('[reviews] 카드 목록 확보', cards.length, '개,', Date.now() - t0, 'ms')
+      const cards = allCards.slice(start, start + 15)
+      console.log('[reviews] 카드 목록 확보', cards.length, `개 (구간 ${start}~${start + 15}),`, Date.now() - t0, 'ms')
       const results = []
 
       for (const card of cards) {
