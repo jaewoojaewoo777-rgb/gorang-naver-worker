@@ -129,14 +129,28 @@ async function gotoReviews(page, placeId, bookingBusinessId) {
 // 네이버 리뷰 목록은 무한스크롤이라 처음엔 카드 10개 정도만 그려짐. "네이버 새 리뷰 확인"을
 // 반복 눌러도 매번 똑같은 최신 10개만 보여서 두 번째 클릭부터 전부 "이미 있음"으로 걸러지던
 // 문제 발견(2026-07-13) → 목표 개수에 도달하거나 더 안 늘어날 때까지 스크롤해서 로드.
-async function loadMoreCards(page, targetCount = 30, maxScrolls = 8) {
-  let lastCount = 0
-  for (let i = 0; i < maxScrolls; i++) {
-    const count = await page.locator(SELECTORS.reviewItem).count().catch(() => 0)
-    if (count >= targetCount || (i > 0 && count === lastCount)) break
-    lastCount = count
+//
+// (2026-07-23 보완) 실사용 확인: 네이버 자체 화면은 계속 스크롤하면 43개 전부 늘어나는데,
+// 여기서는 스크롤당 800ms 한 번만 보고 "그대로면 끝"으로 판단해서, 네이버 쪽 지연로딩이
+// 800ms보다 조금만 늦어도 실제로는 더 있는데 조기에 포기하던 문제로 추정됨(뒤쪽 리뷰일수록
+// 매번 새 페이지에서 처음부터 다시 스크롤해야 해서 영향이 큼). 스크롤 1회당 최대 2초를
+// 500ms씩 나눠 재확인(늘어나면 즉시 다음 스크롤로)하고, 연속 2번 정체돼야 "진짜 끝"으로
+// 판단하게 함. 전체는 시간예산(maxMs)으로 제한 — Vercel 쪽 55초 제한 안에서 카드 파싱
+// (~1.3초/장) 시간까지 남겨둬야 하므로 무한정 기다리지 않음.
+async function loadMoreCards(page, targetCount = 30, maxMs = 20000) {
+  const deadline = Date.now() + maxMs
+  let lastCount = await page.locator(SELECTORS.reviewItem).count().catch(() => 0)
+  let stagnantRounds = 0
+  while (Date.now() < deadline && lastCount < targetCount && stagnantRounds < 2) {
     await page.locator(SELECTORS.reviewItem).last().scrollIntoViewIfNeeded({ timeout: FAST_TIMEOUT }).catch(() => {})
-    await page.waitForTimeout(800)
+    let count = lastCount
+    for (let sub = 0; sub < 4 && Date.now() < deadline; sub++) {
+      await page.waitForTimeout(500)
+      count = await page.locator(SELECTORS.reviewItem).count().catch(() => lastCount)
+      if (count > lastCount) break
+    }
+    stagnantRounds = count > lastCount ? 0 : stagnantRounds + 1
+    lastCount = count
   }
 }
 
@@ -208,7 +222,7 @@ app.post('/reviews', requireAuth, async (req, res) => {
       // 추출량 자체는 15개로 유지하고, "어디서부터" 15개를 뽑을지만 옮겨감.
       const start = Math.max(0, knownCount || 0)
       const target = Math.min(start + 15, 60) // 무한 스크롤 폭주 방지용 상한
-      await loadMoreCards(page, target, 10)
+      await loadMoreCards(page, target, 20000)
       console.log('[reviews] 스크롤 후 카드 개수', await page.locator(SELECTORS.reviewItem).count().catch(() => 0), Date.now() - t0, 'ms')
       const allCards = await page.locator(SELECTORS.reviewItem).all()
       const cards = allCards.slice(start, start + 15)
