@@ -216,17 +216,23 @@ app.post('/reviews', requireAuth, async (req, res) => {
       // (2026-07-15 버그 수정) 예전엔 항상 allCards.slice(0, 15)로 "최신 15개"만 고정으로
       // 가져가서, 그 15개가 DB에 다 쌓이고 나면 스크롤을 해도 영원히 같은 15개만 다시 보고
       // "새 리뷰 없음"만 뜨는 문제가 있었음(43개 중 15개 이후로는 절대 못 감).
-      // 이제 Next.js가 이미 DB에 몇 개 있는지(knownCount) 같이 보내주면, 그 뒤 15개
-      // 구간(윈도우)을 긁어와서 폴링할 때마다 점점 더 오래된 리뷰로 넘어가게 함.
-      // 카드 하나 파싱에 ~1.3초라 한 번에 15개 넘게 추출하면 Vercel 55초 제한에 걸림 —
-      // 추출량 자체는 15개로 유지하고, "어디서부터" 15개를 뽑을지만 옮겨감.
+      // 이제 Next.js가 이미 DB에 몇 개 있는지(knownCount) 같이 보내주면, 그 뒤 구간(윈도우)을
+      // 긁어와서 폴링할 때마다 점점 더 오래된 리뷰로 넘어가게 함.
+      //
+      // (2026-07-23 조정) 실사용 확인 결과 네트워크 상태에 따라 스크롤이 어떤 때는 끝까지
+      // 되고 어떤 때는 중간에 시간예산이 다 되어 멈춤(뒤쪽 구간일수록 매번 새 페이지에서
+      // 처음부터 다시 스크롤해야 하니 영향이 큼) — 어차피 실제 저장은 Next.js 쪽에서
+      // BATCH_SIZE(5)개까지만 하고 나머지는 다음 호출에서 다시 긁으므로, 한 번에 굳이
+      // 15개씩 뽑을 필요가 없음. 윈도우를 10개로 줄여 스크롤 목표치를 낮추고, 카드 파싱
+      // 시간(~1.3초/장)을 아껴 그만큼 스크롤 시간예산을 늘림(20초→26초).
+      const WINDOW = 10
       const start = Math.max(0, knownCount || 0)
-      const target = Math.min(start + 15, 60) // 무한 스크롤 폭주 방지용 상한
-      await loadMoreCards(page, target, 20000)
+      const target = Math.min(start + WINDOW, 60) // 무한 스크롤 폭주 방지용 상한
+      await loadMoreCards(page, target, 26000)
       console.log('[reviews] 스크롤 후 카드 개수', await page.locator(SELECTORS.reviewItem).count().catch(() => 0), Date.now() - t0, 'ms')
       const allCards = await page.locator(SELECTORS.reviewItem).all()
-      const cards = allCards.slice(start, start + 15)
-      console.log('[reviews] 카드 목록 확보', cards.length, `개 (구간 ${start}~${start + 15}),`, Date.now() - t0, 'ms')
+      const cards = allCards.slice(start, start + WINDOW)
+      console.log('[reviews] 카드 목록 확보', cards.length, `개 (구간 ${start}~${start + WINDOW}),`, Date.now() - t0, 'ms')
       const results = []
 
       for (const card of cards) {
